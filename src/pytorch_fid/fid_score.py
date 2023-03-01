@@ -90,7 +90,7 @@ class ImagePathDataset(torch.utils.data.Dataset):
         return img
 
 
-def get_activations(files, model, batch_size=50, dims=2048, device='cpu',
+def _get_activations(files, model, batch_size=50, dims=2048, device='cpu',
                     num_workers=1):
     """Calculates the activations of the pool_3 layer for all images.
 
@@ -149,7 +149,7 @@ def get_activations(files, model, batch_size=50, dims=2048, device='cpu',
     return pred_arr
 
 
-def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+def _calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     """Numpy implementation of the Frechet Distance.
     The Frechet distance between two multivariate Gaussians X_1 ~ N(mu_1, C_1)
     and X_2 ~ N(mu_2, C_2) is
@@ -206,7 +206,7 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
             + np.trace(sigma2) - 2 * tr_covmean)
 
 
-def calculate_activation_statistics(files, model, batch_size=50, dims=2048,
+def _calculate_activation_statistics(files, model, batch_size=50, dims=2048,
                                     device='cpu', num_workers=1):
     """Calculation of the statistics used by the FID.
     Params:
@@ -225,13 +225,13 @@ def calculate_activation_statistics(files, model, batch_size=50, dims=2048,
     -- sigma : The covariance matrix of the activations of the pool_3 layer of
                the inception model.
     """
-    act = get_activations(files, model, batch_size, dims, device, num_workers)
+    act = _get_activations(files, model, batch_size, dims, device, num_workers)
     mu = np.mean(act, axis=0)
     sigma = np.cov(act, rowvar=False)
     return mu, sigma
 
 
-def compute_statistics_of_path(path, model, batch_size, dims, device,
+def _compute_statistics_of_path(path, model, batch_size, dims, device,
                                num_workers=1):
     if path.endswith('.npz'):
         with np.load(path) as f:
@@ -240,14 +240,17 @@ def compute_statistics_of_path(path, model, batch_size, dims, device,
         path = pathlib.Path(path)
         files = sorted([file for ext in IMAGE_EXTENSIONS
                        for file in path.glob('*.{}'.format(ext))])
-        m, s = calculate_activation_statistics(files, model, batch_size,
+        m, s = _calculate_activation_statistics(files, model, batch_size,
                                                dims, device, num_workers)
 
     return m, s
 
+def calculate_FID(paths: tuple, batch_size=50, device='cpu', dims=2048, num_workers=1):
+    """
+    Calculation of the FID score.
+    """    
+    device = torch.device(device)
 
-def calculate_fid_given_paths(paths, batch_size, device, dims, num_workers=1):
-    """Calculates the FID of two paths"""
     for p in paths:
         if not os.path.exists(p):
             raise RuntimeError('Invalid path: %s' % p)
@@ -256,67 +259,42 @@ def calculate_fid_given_paths(paths, batch_size, device, dims, num_workers=1):
 
     model = InceptionV3([block_idx]).to(device)
 
-    m1, s1 = compute_statistics_of_path(paths[0], model, batch_size,
+    if os.path.exists(os.path.join(paths[0], 'statistics.npz')):
+        paths[0] = os.path.exists(os.path.join(paths[0], 'statistics.npz'))
+
+    if os.path.exists(os.path.join(paths[1], 'statistics.npz')):
+        paths[1] = os.path.exists(os.path.join(paths[1], 'statistics.npz'))
+
+    m1, s1 = _compute_statistics_of_path(paths[0], model, batch_size,
                                         dims, device, num_workers)
-    m2, s2 = compute_statistics_of_path(paths[1], model, batch_size,
+    m2, s2 = _compute_statistics_of_path(paths[1], model, batch_size,
                                         dims, device, num_workers)
-    fid_value = calculate_frechet_distance(m1, s1, m2, s2)
+    
+    np.savez_compressed(os.path.join(paths[0], 'statistics.npz'), mu=m1, sigma=s1)
+    np.savez_compressed(os.path.join(paths[1], 'statistics.npz'), mu=m2, sigma=s2)
+
+    fid_value = _calculate_frechet_distance(m1, s1, m2, s2)
+
+    print('FID: ', fid_value)
 
     return fid_value
 
+def calculate_stats(path: tuple, batch_size=50, device='cpu', dims=2048, num_workers=1):
+    """
+    Calculation of the statistics used by the FID: mean and sigma.
+    """
+    device = torch.device(device)
 
-def save_fid_stats(paths, batch_size, device, dims, num_workers=1):
-    """Calculates the FID of two paths"""
-    if not os.path.exists(paths[0]):
-        raise RuntimeError('Invalid path: %s' % paths[0])
-
-    if os.path.exists(paths[1]):
-        raise RuntimeError('Existing output file: %s' % paths[1])
+    if not os.path.exists(path):
+        raise RuntimeError(f"Invalid path: {path}")
 
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
 
     model = InceptionV3([block_idx]).to(device)
 
-    print(f"Saving statistics for {paths[0]}")
+    print(f"Calculating statistics for dataset: {path}")
 
-    m1, s1 = compute_statistics_of_path(paths[0], model, batch_size,
+    m, s = _compute_statistics_of_path(path, model, batch_size,
                                         dims, device, num_workers)
-
-    np.savez_compressed(paths[1], mu=m1, sigma=s1)
-
-
-def main():
-    args = parser.parse_args()
-
-    if args.device is None:
-        device = torch.device('cuda' if (torch.cuda.is_available()) else 'cpu')
-    else:
-        device = torch.device(args.device)
-
-    if args.num_workers is None:
-        try:
-            num_cpus = len(os.sched_getaffinity(0))
-        except AttributeError:
-            # os.sched_getaffinity is not available under Windows, use
-            # os.cpu_count instead (which may not return the *available* number
-            # of CPUs).
-            num_cpus = os.cpu_count()
-
-        num_workers = min(num_cpus, 8) if num_cpus is not None else 0
-    else:
-        num_workers = args.num_workers
-
-    if args.save_stats:
-        save_fid_stats(args.path, args.batch_size, device, args.dims, num_workers)
-        return
-
-    fid_value = calculate_fid_given_paths(args.path,
-                                          args.batch_size,
-                                          device,
-                                          args.dims,
-                                          num_workers)
-    print('FID: ', fid_value)
-
-
-if __name__ == '__main__':
-    main()
+    
+    np.savez_compressed(os.path.join(path, 'statistics.npz'), mu=m, sigma=s)
