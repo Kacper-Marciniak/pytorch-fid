@@ -4,15 +4,9 @@ The FID metric calculates the distance between two distributions of images.
 Typically, we have summary statistics (mean & covariance matrix) of one
 of these distributions, while the 2nd distribution is given by a GAN.
 
-When run as a stand-alone program, it compares the distribution of
-images that are stored as PNG/JPEG at a specified location with a
-distribution given by summary statistics (in pickle format).
-
 The FID is calculated by assuming that X_1 and X_2 are the activations of
 the pool_3 layer of the inception net for generated samples and real world
 samples respectively.
-
-See --help to see further details.
 
 Code apapted from https://github.com/bioinf-jku/TTUR to use PyTorch instead
 of Tensorflow
@@ -234,8 +228,7 @@ def _calculate_activation_statistics(files, model, batch_size=50, dims=2048,
 def _compute_statistics_of_path(path, model, batch_size, dims, device,
                                num_workers=1):
     if path.endswith('.npz'):
-        with np.load(path) as f:
-            m, s = f['mu'][:], f['sigma'][:]
+        m, s = load_statistics(path)
     else:
         path = pathlib.Path(path)
         files = sorted([file for ext in IMAGE_EXTENSIONS
@@ -245,7 +238,13 @@ def _compute_statistics_of_path(path, model, batch_size, dims, device,
 
     return m, s
 
-def calculate_FID(paths: tuple, batch_size=50, device='cpu', dims=2048, num_workers=1):
+
+def load_statistics(path):
+    with np.load(path) as f:
+        m, s = f['mu'][:], f['sigma'][:]
+    return m, s
+
+def calculate_FID(paths: list, batch_size=50, device='cpu', dims=2048, num_workers=1):
     """
     Calculation of the FID score.
     """    
@@ -260,18 +259,19 @@ def calculate_FID(paths: tuple, batch_size=50, device='cpu', dims=2048, num_work
     model = InceptionV3([block_idx]).to(device)
 
     if os.path.exists(os.path.join(paths[0], 'statistics.npz')):
-        paths[0] = os.path.exists(os.path.join(paths[0], 'statistics.npz'))
+        paths[0] = os.path.join(paths[0], 'statistics.npz')
 
     if os.path.exists(os.path.join(paths[1], 'statistics.npz')):
-        paths[1] = os.path.exists(os.path.join(paths[1], 'statistics.npz'))
+        paths[1] = os.path.join(paths[1], 'statistics.npz')
 
     m1, s1 = _compute_statistics_of_path(paths[0], model, batch_size,
                                         dims, device, num_workers)
     m2, s2 = _compute_statistics_of_path(paths[1], model, batch_size,
                                         dims, device, num_workers)
-    
-    np.savez_compressed(os.path.join(paths[0], 'statistics.npz'), mu=m1, sigma=s1)
-    np.savez_compressed(os.path.join(paths[1], 'statistics.npz'), mu=m2, sigma=s2)
+    if not paths[0].endswith('.npz'):
+        np.savez_compressed(os.path.join(paths[0], 'statistics.npz'), mu=m1, sigma=s1)
+    if not paths[1].endswith('.npz'):
+        np.savez_compressed(os.path.join(paths[1], 'statistics.npz'), mu=m2, sigma=s2)
 
     fid_value = _calculate_frechet_distance(m1, s1, m2, s2)
 
@@ -279,7 +279,7 @@ def calculate_FID(paths: tuple, batch_size=50, device='cpu', dims=2048, num_work
 
     return fid_value
 
-def calculate_stats(path: tuple, batch_size=50, device='cpu', dims=2048, num_workers=1):
+def calculate_stats(path: str, batch_size=50, device='cpu', dims=2048, num_workers=1):
     """
     Calculation of the statistics used by the FID: mean and sigma.
     """
@@ -298,3 +298,25 @@ def calculate_stats(path: tuple, batch_size=50, device='cpu', dims=2048, num_wor
                                         dims, device, num_workers)
     
     np.savez_compressed(os.path.join(path, 'statistics.npz'), mu=m, sigma=s)
+
+    print(f"Statistics saved as: {os.path.join(path, 'statistics.npz')}")
+
+
+def calculate_features(path: str, batch_size=50, device='cpu', dims=2048, num_workers=1):
+    """
+    Save image feature vectors.
+    """
+    device = torch.device(device)
+
+    if not os.path.exists(path):
+        raise RuntimeError(f"Invalid path: {path}")
+
+    block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+
+    model = InceptionV3([block_idx]).to(device)
+
+    path = pathlib.Path(path)
+    files = sorted([file for ext in IMAGE_EXTENSIONS
+                       for file in path.glob('*.{}'.format(ext))])
+    act = _get_activations(files, model, batch_size, dims, device, num_workers)
+    np.savetxt(os.path.join(path, 'features.csv'), act, delimiter=',')
